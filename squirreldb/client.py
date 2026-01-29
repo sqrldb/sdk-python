@@ -1,12 +1,17 @@
 """SquirrelDB client implementation"""
 
+from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
 from websockets.asyncio.client import connect as ws_connect, ClientConnection
 
 from .types import Document, ChangeEvent
+from .query import StructuredQuery, QueryBuilder, Doc, _filter_to_structured
+
+if TYPE_CHECKING:
+    from .query import FilterCondition
 
 
 class SquirrelDB:
@@ -111,17 +116,45 @@ class SquirrelDB:
     def _generate_id(self) -> str:
         return str(uuid.uuid4())
 
-    async def query(self, q: str) -> list[Document]:
-        """Execute a query"""
+    def subscribe(self, table_name: str) -> "SubscriptionBuilder":
+        """
+        Subscribe to changes on a table (fluent API)
+
+        Usage:
+            await db.subscribe("users").changes(callback)
+            await db.subscribe("users").find(lambda doc: doc.status.eq("active")).changes(callback)
+        """
+        return SubscriptionBuilder(self, table_name)
+
+    async def query_structured(self, q: StructuredQuery) -> list[Document]:
+        """Execute a structured query (no JS evaluation on server)"""
         resp = await self._send({"type": "query", "id": self._generate_id(), "query": q})
         if resp["type"] == "error":
             raise Exception(resp["error"])
         return [Document.from_dict(d) for d in resp["data"]]
 
-    async def subscribe(
+    async def subscribe_structured(
+        self, q: StructuredQuery, callback: Callable[[ChangeEvent], None]
+    ) -> str:
+        """Subscribe to changes with structured query"""
+        sub_id = self._generate_id()
+        resp = await self._send({"type": "subscribe", "id": sub_id, "query": q})
+        if resp["type"] == "error":
+            raise Exception(resp["error"])
+        self._subscriptions[sub_id] = callback
+        return sub_id
+
+    async def query(self, q: str) -> list[Document]:
+        """Execute a query (legacy, prefer query_structured)"""
+        resp = await self._send({"type": "query", "id": self._generate_id(), "query": q})
+        if resp["type"] == "error":
+            raise Exception(resp["error"])
+        return [Document.from_dict(d) for d in resp["data"]]
+
+    async def subscribe_raw(
         self, q: str, callback: Callable[[ChangeEvent], None]
     ) -> str:
-        """Subscribe to changes"""
+        """Subscribe to changes with raw query string (legacy)"""
         sub_id = self._generate_id()
         resp = await self._send({"type": "subscribe", "id": sub_id, "query": q})
         if resp["type"] == "error":
@@ -194,6 +227,45 @@ class SquirrelDB:
             self._recv_task.cancel()
         if self._ws:
             await self._ws.close()
+
+
+class SubscriptionBuilder:
+    """
+    Subscription builder for fluent change subscriptions.
+
+    Usage:
+        await db.subscribe("users").changes(callback)
+        await db.subscribe("users").find(lambda doc: doc.status.eq("active")).changes(callback)
+    """
+
+    def __init__(self, client: SquirrelDB, table_name: str):
+        self._client = client
+        self._table_name = table_name
+        self._filter_condition: Optional[dict] = None
+
+    def find(
+        self,
+        condition: Callable[[Doc], dict] | dict | None = None,
+        **kwargs: Any
+    ) -> "SubscriptionBuilder":
+        """Filter changes matching condition."""
+        if callable(condition):
+            self._filter_condition = condition(Doc())
+        elif condition is not None:
+            self._filter_condition = condition
+        elif kwargs:
+            self._filter_condition = {k: v for k, v in kwargs.items()}
+        return self
+
+    async def changes(self, callback: Callable[[ChangeEvent], None]) -> str:
+        """Subscribe to changes."""
+        query: StructuredQuery = {
+            "table": self._table_name,
+            "changes": {"includeInitial": False},
+        }
+        if self._filter_condition:
+            query["filter"] = _filter_to_structured(self._filter_condition)
+        return await self._client.subscribe_structured(query, callback)
 
 
 # Convenience function

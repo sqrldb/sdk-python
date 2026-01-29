@@ -26,6 +26,7 @@ from .query import (
     Exists,
 )
 from .storage import Storage, Bucket, Object, MultipartUpload, UploadPart
+from .cache import Cache, CacheError
 
 __all__ = [
     # Client
@@ -65,5 +66,8 @@ __all__ = [
     "Object",
     "MultipartUpload",
     "UploadPart",
+    # Cache
+    "Cache",
+    "CacheError",
 ]
 __version__ = "0.1.0"

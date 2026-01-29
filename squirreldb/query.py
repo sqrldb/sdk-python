@@ -5,9 +5,30 @@ Compiles to SquirrelDB's JavaScript query syntax
 Uses MongoDB-like naming with Python conventions: find/sort/limit
 """
 
-from dataclasses import dataclass
-from typing import Any, Callable, Union
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, Callable, Union, TypedDict
 import json
+
+
+class StructuredSort(TypedDict, total=False):
+    """Sort specification for structured queries"""
+    field: str
+    direction: str
+
+
+class StructuredChanges(TypedDict, total=False):
+    """Changes specification for structured queries"""
+    includeInitial: bool
+
+
+class StructuredQuery(TypedDict, total=False):
+    """Structured query object sent over the wire"""
+    table: str
+    filter: dict[str, Any]
+    sort: list[StructuredSort]
+    limit: int
+    skip: int
+    changes: StructuredChanges
 
 
 @dataclass
@@ -205,6 +226,48 @@ def _compile_filter(condition: FilterCondition) -> str:
     return " && ".join(parts) if parts else "true"
 
 
+def _filter_to_structured(condition: FilterCondition) -> dict[str, Any]:
+    """Convert a filter condition to structured query format"""
+    result: dict[str, Any] = {}
+
+    for field_name, value in condition.items():
+        if field_name == "$and" and isinstance(value, list):
+            result["$and"] = [_filter_to_structured(c) for c in value]
+        elif field_name == "$or" and isinstance(value, list):
+            result["$or"] = [_filter_to_structured(c) for c in value]
+        elif field_name == "$not" and isinstance(value, dict):
+            result["$not"] = _filter_to_structured(value)
+        elif isinstance(value, Eq):
+            result[field_name] = {"$eq": value.value}
+        elif isinstance(value, Ne):
+            result[field_name] = {"$ne": value.value}
+        elif isinstance(value, Gt):
+            result[field_name] = {"$gt": value.value}
+        elif isinstance(value, Gte):
+            result[field_name] = {"$gte": value.value}
+        elif isinstance(value, Lt):
+            result[field_name] = {"$lt": value.value}
+        elif isinstance(value, Lte):
+            result[field_name] = {"$lte": value.value}
+        elif isinstance(value, In):
+            result[field_name] = {"$in": value.values}
+        elif isinstance(value, NotIn):
+            result[field_name] = {"$nin": value.values}
+        elif isinstance(value, Contains):
+            result[field_name] = {"$contains": value.value}
+        elif isinstance(value, StartsWith):
+            result[field_name] = {"$startsWith": value.value}
+        elif isinstance(value, EndsWith):
+            result[field_name] = {"$endsWith": value.value}
+        elif isinstance(value, Exists):
+            result[field_name] = {"$exists": value.value}
+        else:
+            # Direct equality
+            result[field_name] = {"$eq": value}
+
+    return result
+
+
 class QueryBuilder:
     """
     Query builder for fluent, type-safe queries.
@@ -217,6 +280,7 @@ class QueryBuilder:
     def __init__(self, table_name: str):
         self._table_name = table_name
         self._filter_expr: str | None = None
+        self._filter_condition: FilterCondition | None = None
         self._sort_specs: list[tuple[str, str]] = []
         self._limit_value: int | None = None
         self._skip_value: int | None = None
@@ -236,13 +300,16 @@ class QueryBuilder:
             .find(name="Alice", status="active")  # kwargs for equality
         """
         if callable(condition):
-            condition = condition(Doc())
-            self._filter_expr = _compile_filter(condition)
+            cond = condition(Doc())
+            self._filter_condition = cond
+            self._filter_expr = _compile_filter(cond)
         elif condition is not None:
+            self._filter_condition = condition
             self._filter_expr = _compile_filter(condition)
         elif kwargs:
             # Convert kwargs to equality conditions
             cond = {k: v for k, v in kwargs.items()}
+            self._filter_condition = cond
             self._filter_expr = _compile_filter(cond)
         return self
 
@@ -271,17 +338,17 @@ class QueryBuilder:
         return self
 
     def compile(self) -> str:
-        """Compile to SquirrelDB JS query string."""
+        """Compile to SquirrelDB JS query string (legacy)."""
         query = f'db.table("{self._table_name}")'
 
         if self._filter_expr:
             query += f".filter(doc => {self._filter_expr})"
 
-        for field, direction in self._sort_specs:
+        for field_name, direction in self._sort_specs:
             if direction == "desc":
-                query += f'.orderBy("{field}", "desc")'
+                query += f'.orderBy("{field_name}", "desc")'
             else:
-                query += f'.orderBy("{field}")'
+                query += f'.orderBy("{field_name}")'
 
         if self._limit_value is not None:
             query += f".limit({self._limit_value})"
@@ -293,6 +360,30 @@ class QueryBuilder:
             query += ".changes()"
         else:
             query += ".run()"
+
+        return query
+
+    def compile_structured(self) -> StructuredQuery:
+        """Compile to structured query object (preferred, no JS evaluation on server)."""
+        query: StructuredQuery = {"table": self._table_name}
+
+        if self._filter_condition:
+            query["filter"] = _filter_to_structured(self._filter_condition)
+
+        if self._sort_specs:
+            query["sort"] = [
+                {"field": field_name, "direction": direction}
+                for field_name, direction in self._sort_specs
+            ]
+
+        if self._limit_value is not None:
+            query["limit"] = self._limit_value
+
+        if self._skip_value is not None:
+            query["skip"] = self._skip_value
+
+        if self._is_changes:
+            query["changes"] = {"includeInitial": False}
 
         return query
 
