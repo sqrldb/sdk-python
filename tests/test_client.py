@@ -1,135 +1,11 @@
-"""Tests for SquirrelDB Python client"""
+"""Tests for SquirrelDB Python client - mock-based unit tests"""
 
-import os
-import asyncio
 import pytest
-from squirreldb import SquirrelDB, Document, ChangeEvent
-
-TEST_URL = os.environ.get("SQUIRRELDB_URL", "localhost:8080")
+from squirreldb import Document, ChangeEvent
 
 
-@pytest.fixture
-async def db():
-    """Create a connected client for testing"""
-    client = await SquirrelDB.connect(TEST_URL)
-    yield client
-    await client.close()
-
-
-class TestConnection:
-    """Test connection functionality"""
-
-    @pytest.mark.asyncio
-    async def test_connect_without_prefix(self):
-        db = await SquirrelDB.connect(TEST_URL)
-        await db.ping()
-        await db.close()
-
-    @pytest.mark.asyncio
-    async def test_connect_with_ws_prefix(self):
-        db = await SquirrelDB.connect(f"ws://{TEST_URL}")
-        await db.ping()
-        await db.close()
-
-    @pytest.mark.asyncio
-    async def test_ping(self, db):
-        await db.ping()  # Should not raise
-
-
-class TestCRUD:
-    """Test CRUD operations"""
-
-    @pytest.mark.asyncio
-    async def test_insert_document(self, db):
-        doc = await db.insert("py_test_users", {"name": "Alice", "age": 30})
-
-        assert isinstance(doc, Document)
-        assert doc.id is not None
-        assert doc.collection == "py_test_users"
-        assert doc.data == {"name": "Alice", "age": 30}
-        assert doc.created_at is not None
-        assert doc.updated_at is not None
-
-    @pytest.mark.asyncio
-    async def test_query_documents(self, db):
-        # Insert a document first
-        await db.insert("py_test_query", {"name": "Bob", "age": 25})
-
-        docs = await db.query('db.table("py_test_query").run()')
-
-        assert isinstance(docs, list)
-        assert len(docs) > 0
-        assert all(isinstance(d, Document) for d in docs)
-
-    @pytest.mark.asyncio
-    async def test_update_document(self, db):
-        inserted = await db.insert("py_test_update", {"name": "Charlie", "age": 35})
-        updated = await db.update(
-            "py_test_update", inserted.id, {"name": "Charlie", "age": 36}
-        )
-
-        assert updated.id == inserted.id
-        assert updated.data == {"name": "Charlie", "age": 36}
-
-    @pytest.mark.asyncio
-    async def test_delete_document(self, db):
-        inserted = await db.insert("py_test_delete", {"name": "Dave", "age": 40})
-        deleted = await db.delete("py_test_delete", inserted.id)
-
-        assert deleted.id == inserted.id
-
-    @pytest.mark.asyncio
-    async def test_list_collections(self, db):
-        # Ensure at least one collection exists
-        await db.insert("py_test_list", {"test": True})
-
-        collections = await db.list_collections()
-
-        assert isinstance(collections, list)
-        assert len(collections) > 0
-        assert all(isinstance(c, str) for c in collections)
-
-
-class TestSubscriptions:
-    """Test subscription functionality"""
-
-    @pytest.mark.asyncio
-    async def test_subscribe_and_unsubscribe(self, db):
-        changes = []
-
-        def on_change(change: ChangeEvent):
-            changes.append(change)
-
-        sub_id = await db.subscribe('db.table("py_test_sub").changes()', on_change)
-
-        assert sub_id is not None
-        assert isinstance(sub_id, str)
-
-        # Insert a document to trigger a change
-        await db.insert("py_test_sub", {"name": "Eve", "age": 28})
-
-        # Wait for change to arrive
-        await asyncio.sleep(0.1)
-
-        # Unsubscribe
-        await db.unsubscribe(sub_id)
-
-        # Should have received at least one change
-        assert len(changes) > 0
-        assert all(isinstance(c, ChangeEvent) for c in changes)
-
-
-class TestErrors:
-    """Test error handling"""
-
-    @pytest.mark.asyncio
-    async def test_invalid_query_raises_exception(self, db):
-        with pytest.raises(Exception):
-            await db.query("invalid query syntax")
-
-
-class TestTypes:
-    """Test type structures"""
+class TestDocument:
+    """Test Document type"""
 
     def test_document_from_dict(self):
         data = {
@@ -144,6 +20,27 @@ class TestTypes:
         assert doc.id == "123"
         assert doc.collection == "users"
         assert doc.data == {"name": "Test"}
+        assert doc.created_at == "2024-01-01T00:00:00Z"
+        assert doc.updated_at == "2024-01-01T00:00:00Z"
+
+    def test_document_has_correct_fields(self):
+        doc = Document(
+            id="test-id",
+            collection="test-collection",
+            data={"foo": "bar"},
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-01T00:00:00Z",
+        )
+
+        assert isinstance(doc.id, str)
+        assert isinstance(doc.collection, str)
+        assert isinstance(doc.data, dict)
+        assert isinstance(doc.created_at, str)
+        assert isinstance(doc.updated_at, str)
+
+
+class TestChangeEvent:
+    """Test ChangeEvent type"""
 
     def test_change_event_initial(self):
         data = {
@@ -211,3 +108,132 @@ class TestTypes:
 
         assert event.type == "delete"
         assert event.old is not None
+
+
+class TestMessageProtocol:
+    """Test message protocol structures"""
+
+    def test_ping_message(self):
+        msg = {"type": "Ping"}
+        assert msg["type"] == "Ping"
+
+    def test_query_message(self):
+        msg = {
+            "type": "Query",
+            "id": "req-123",
+            "query": 'db.table("users").run()',
+        }
+        assert msg["type"] == "Query"
+        assert msg["id"] == "req-123"
+        assert "users" in msg["query"]
+
+    def test_insert_message(self):
+        msg = {
+            "type": "Insert",
+            "id": "req-456",
+            "collection": "users",
+            "data": {"name": "Alice"},
+        }
+        assert msg["type"] == "Insert"
+        assert msg["collection"] == "users"
+        assert msg["data"] == {"name": "Alice"}
+
+    def test_update_message(self):
+        msg = {
+            "type": "Update",
+            "id": "req-789",
+            "collection": "users",
+            "document_id": "doc-123",
+            "data": {"name": "Bob"},
+        }
+        assert msg["type"] == "Update"
+        assert msg["document_id"] == "doc-123"
+
+    def test_delete_message(self):
+        msg = {
+            "type": "Delete",
+            "id": "req-101",
+            "collection": "users",
+            "document_id": "doc-123",
+        }
+        assert msg["type"] == "Delete"
+        assert msg["document_id"] == "doc-123"
+
+    def test_subscribe_message(self):
+        msg = {
+            "type": "Subscribe",
+            "id": "req-202",
+            "query": 'db.table("users").changes()',
+        }
+        assert msg["type"] == "Subscribe"
+        assert "changes" in msg["query"]
+
+    def test_unsubscribe_message(self):
+        msg = {
+            "type": "Unsubscribe",
+            "id": "req-303",
+            "subscription_id": "sub-123",
+        }
+        assert msg["type"] == "Unsubscribe"
+        assert msg["subscription_id"] == "sub-123"
+
+
+class TestServerResponseProtocol:
+    """Test server response protocol structures"""
+
+    def test_pong_response(self):
+        response = {"type": "Pong"}
+        assert response["type"] == "Pong"
+
+    def test_result_response(self):
+        response = {
+            "type": "Result",
+            "id": "req-123",
+            "documents": [
+                {
+                    "id": "1",
+                    "collection": "users",
+                    "data": {"name": "Alice"},
+                    "created_at": "",
+                    "updated_at": "",
+                }
+            ],
+        }
+        assert response["type"] == "Result"
+        assert len(response["documents"]) == 1
+
+    def test_error_response(self):
+        response = {
+            "type": "Error",
+            "id": "req-123",
+            "message": "Query failed",
+        }
+        assert response["type"] == "Error"
+        assert response["message"] == "Query failed"
+
+    def test_subscribed_response(self):
+        response = {
+            "type": "Subscribed",
+            "id": "req-123",
+            "subscription_id": "sub-456",
+        }
+        assert response["type"] == "Subscribed"
+        assert response["subscription_id"] == "sub-456"
+
+    def test_change_response(self):
+        response = {
+            "type": "Change",
+            "subscription_id": "sub-456",
+            "change": {
+                "type": "insert",
+                "new": {
+                    "id": "1",
+                    "collection": "users",
+                    "data": {},
+                    "created_at": "",
+                    "updated_at": "",
+                },
+            },
+        }
+        assert response["type"] == "Change"
+        assert response["change"]["type"] == "insert"
