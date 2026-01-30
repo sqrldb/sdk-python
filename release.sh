@@ -3,18 +3,25 @@ set -e
 
 cd "$(dirname "$0")"
 
-VERSION=$(grep 'version' pyproject.toml | head -1 | awk -F'"' '{print $2}')
+VERSION="0.1.0"
 
-echo "Building squirreldb Python SDK v${VERSION}..."
+echo "Releasing squirreldb-sdk v${VERSION}..."
 
-rm -rf dist/ build/ *.egg-info
-
-python -m build
+# Install build dependencies
+echo "Installing build dependencies..."
+pip install --quiet build twine pytest
 
 echo "Running tests..."
-python -m pytest tests/
+python -m pytest tests/ -q
+
+echo "Building..."
+rm -rf dist/ build/ *.egg-info
+python -m build
 
 echo "Publishing to PyPI..."
 python -m twine upload dist/*
 
-echo "Published squirreldb==${VERSION} to PyPI"
+echo "Released squirreldb-sdk@${VERSION}"
+echo ""
+echo "Users can install with:"
+echo "  pip install squirreldb-sdk"
